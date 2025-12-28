@@ -1,0 +1,112 @@
+import os
+import smtplib
+import requests
+import json
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+
+# ==========================================
+# CONFIGURATION (Loaded from Environment)
+# ==========================================
+HEVY_API_KEY = os.environ.get("HEVY_API_KEY")
+EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD") # App Password, not login password
+EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
+
+HEVY_API_URL = 'https://api.hevyapp.com/v1'
+
+# Progressive Overload Settings
+GOAL_REPS = 12
+PROGRESSION_RPE_TRIGGER = 9
+WEIGHT_INCREMENT_KG = 2.5
+WEIGHT_INCREMENT_LBS = 5
+
+def get_latest_workout():
+    headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
+    try:
+        response = requests.get(f"{HEVY_API_URL}/workouts", headers=headers, params={'page': 1, 'pageSize': 1})
+        response.raise_for_status()
+        workouts = response.json().get('workouts', [])
+        return workouts[0] if workouts else None
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+def calculate_next_target(exercise_name, sets):
+    working_sets = [s for s in sets if s.get('set_type') == 'normal']
+    if not working_sets: return None
+
+    last_set = working_sets[-1]
+    reps = last_set.get('reps', 0)
+    weight = last_set.get('weight_kg', 0)
+    rpe = last_set.get('rpe') if last_set.get('rpe') is not None else 8.0
+
+    recommendation = {}
+    
+    # LOGIC ENGINE
+    if reps >= GOAL_REPS and rpe <= PROGRESSION_RPE_TRIGGER:
+        new_weight = weight + WEIGHT_INCREMENT_KG
+        recommendation = {
+            "action": "INCREASE WEIGHT",
+            "detail": f"Add {WEIGHT_INCREMENT_KG}kg / {WEIGHT_INCREMENT_LBS}lbs. Target 8-10 reps.",
+            "color": "green"
+        }
+    elif reps < GOAL_REPS and rpe < 9:
+        recommendation = {
+            "action": "ADD REPS",
+            "detail": f"Keep weight ({weight}kg). Push for {min(reps + 2, 12)} reps.",
+            "color": "blue"
+        }
+    elif reps < (GOAL_REPS - 4) and rpe >= 9.5:
+        new_weight = weight * 0.90
+        recommendation = {
+            "action": "DELOAD / RESET",
+            "detail": f"Performance dip. Drop to {round(new_weight, 1)}kg to hit 12 reps.",
+            "color": "red"
+        }
+    else:
+        recommendation = {
+            "action": "MAINTAIN",
+            "detail": f"Keep weight ({weight}kg). Squeeze out 1 more rep.",
+            "color": "black"
+        }
+
+    return {"exercise": exercise_name, "last": f"{reps} reps @ {weight}kg (RPE {rpe})", **recommendation}
+
+def send_email(html_content, workout_title):
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_RECEIVER
+    msg['Subject'] = f"???? Next Workout Targets: {workout_title}"
+    msg.attach(MIMEText(html_content, 'html'))
+
+    try:
+        # Connect to Gmail SMTP
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+if __name__ == "__main__":
+    print("Starting process...")
+    if not HEVY_API_KEY or not EMAIL_PASSWORD:
+        print("Error: Missing Environment Variables.")
+    else:
+        workout = get_latest_workout()
+        if workout:
+            # Build HTML
+            html = "<h1>???? Progressive Overload Targets</h1><ul>"
+            for ex in workout.get('exercises', []):
+                res = calculate_next_target(ex.get('title'), ex.get('sets', []))
+                if res:
+                    html += f"<li><strong>{res['exercise']}</strong><br><span style='color:gray'>{res['last']}</span><br><b style='color:{res['color']}'>{res['action']}</b>: {res['detail']}</li><br>"
+            html += "</ul>"
+            
+            send_email(html, workout.get('title'))
+        else:
+            print("No workout found.")
