@@ -60,8 +60,12 @@ def calculate_next_target(exercise_name, sets):
     if not sets: return None
 
     last_set = sets[-1]
-    reps = last_set.get('reps', 0)
-    weight_kg = last_set.get('weight_kg', 0)
+    
+    # --- SANITIZE DATA (Fix for NoneType Error) ---
+    reps = last_set.get('reps')
+    if reps is None: reps = 0
+    
+    weight_kg = last_set.get('weight_kg')
     if weight_kg is None: weight_kg = 0
     
     # Convert KG to LBS
@@ -74,6 +78,10 @@ def calculate_next_target(exercise_name, sets):
     
     # LOGIC ENGINE (Universal Rule)
     
+    # 0. SKIP: If reps are 0 (e.g. Cardio/Plank), skip it
+    if reps == 0:
+        return None
+
     # 1. PASSED: Hit 12 reps @ RPE 9 -> Add 5 lbs
     if reps >= GOAL_REPS and rpe <= PROGRESSION_RPE_TRIGGER:
         new_weight = weight_lbs + WEIGHT_INCREMENT_LBS
