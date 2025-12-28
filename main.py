@@ -3,7 +3,7 @@ import smtplib
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ==========================================
 # CONFIGURATION
@@ -24,12 +24,10 @@ def get_weekly_workouts():
     headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
     all_workouts = []
     
-    # Calculate the cutoff date (7 days ago from right now)
-    cutoff_date = datetime.now() - timedelta(days=7)
+    # FIX: Make cutoff date Timezone-Aware (UTC) so it matches the API
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
     print(f"Filtering for workouts after: {cutoff_date.strftime('%Y-%m-%d')}")
 
-    # Fetch up to 30 workouts to be safe, then filter by date
-    # We fetch a bit more than needed just in case you worked out a lot
     for page_num in range(1, 4):
         try:
             params = {'page': page_num, 'pageSize': 10}
@@ -44,22 +42,22 @@ def get_weekly_workouts():
             if not workouts:
                 break
             
-            # --- DATE FILTERING LOGIC ---
             for w in workouts:
-                # Hevy sends dates like '2023-10-27T12:00:00Z'
-                # We strip the 'Z' and convert to a Python date object
-                w_date_str = w.get('start_time', '').replace('Z', '')
+                # FIX: Handle the 'Z' properly to make the API date Timezone-Aware
+                w_date_str = w.get('start_time', '')
+                if w_date_str.endswith('Z'):
+                    w_date_str = w_date_str.replace('Z', '+00:00')
+                
                 try:
                     w_date = datetime.fromisoformat(w_date_str)
                 except ValueError:
-                    continue # Skip if date is weird
+                    continue 
 
-                # If the workout is NEWER than our cutoff, keep it.
+                # Now both dates are UTC-aware, so Python can compare them safely
                 if w_date >= cutoff_date:
                     all_workouts.append(w)
                 else:
-                    # If we hit an old workout, we can stop fetching entirely 
-                    # (since Hevy returns them new -> old)
+                    # Found an old workout, stop fetching
                     return all_workouts
             
         except Exception as e:
@@ -73,7 +71,6 @@ def group_by_routine(workouts):
     routines = {}
     for w in workouts:
         title = w.get('title', 'Unknown Workout')
-        # Only keep the most recent occurrence of each routine title
         if title not in routines:
             routines[title] = w
     return routines
@@ -83,7 +80,6 @@ def calculate_next_target(exercise_name, sets):
 
     last_set = sets[-1]
     
-    # Sanitize Data
     reps = last_set.get('reps')
     if reps is None: reps = 0
     
@@ -159,13 +155,10 @@ if __name__ == "__main__":
     
     if not latest_routines:
         print("No workouts found in the last 7 days.")
-        # Optional: You could enable this line if you WANT an email saying "No workouts this week"
-        # send_email("<h1>No workouts logged this week.</h1>", "No workouts logged this week.", "", "")
         exit()
 
     print(f"Found {len(latest_routines)} routines from this week.")
 
-    # Date formatting for the email subject
     end_date = datetime.now().strftime('%b %d')
     start_date = (datetime.now() - timedelta(days=7)).strftime('%b %d')
 
@@ -178,11 +171,14 @@ if __name__ == "__main__":
 
     for title, data in latest_routines.items():
         
-        # Routine Header
+        # Safe Date Parsing for Display
+        raw_date = data['start_time'].replace('Z', '+00:00')
+        display_date = datetime.fromisoformat(raw_date).strftime('%A, %b %d')
+
         html_content += f"""
         <div style="background-color: #f4f4f4; padding: 10px; margin-top: 20px; border-radius: 5px;">
             <h3 style="margin: 0; color: #222;">{title}</h3>
-            <span style="font-size: 12px; color: #666;">Date: {datetime.fromisoformat(data['start_time'].replace('Z', '')).strftime('%A, %b %d')}</span>
+            <span style="font-size: 12px; color: #666;">Date: {display_date}</span>
         </div>
         <ul style="list-style-type: none; padding: 0;">
         """
@@ -194,15 +190,4 @@ if __name__ == "__main__":
                 html_content += f"""
                 <li style="padding: 10px 0; border-bottom: 1px solid #eee;">
                     <strong>{res['exercise']}</strong><br>
-                    <span style="color:#666; font-size:13px;">Last: {res['last']}</span><br>
-                    <strong style="color:{res['color']}; font-size:14px;">👉 {res['action']}</strong>: {res['detail']}
-                </li>
-                """
-                text_content += f"[{res['exercise']}] {res['action']}: {res['detail']}\n"
-        
-        html_content += "</ul>"
-        text_content += "\n"
-
-    html_content += "</div>"
-
-    send_email(html_content, text_content, start_date, end_date)
+                    <span style="color:#666; font-size:13px;">Last: {res
