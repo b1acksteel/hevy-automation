@@ -3,7 +3,7 @@ import smtplib
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ==========================================
 # CONFIGURATION
@@ -19,18 +19,23 @@ GOAL_REPS = 12
 PROGRESSION_RPE_TRIGGER = 9
 WEIGHT_INCREMENT_LBS = 5
 
-def get_recent_workouts():
-    """Fetches the last 30 workouts safely (3 pages of 10)."""
+def get_weekly_workouts():
+    """Fetches workouts from the last 7 days only."""
     headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
     all_workouts = []
     
+    # Calculate the cutoff date (7 days ago from right now)
+    cutoff_date = datetime.now() - timedelta(days=7)
+    print(f"Filtering for workouts after: {cutoff_date.strftime('%Y-%m-%d')}")
+
+    # Fetch up to 30 workouts to be safe, then filter by date
+    # We fetch a bit more than needed just in case you worked out a lot
     for page_num in range(1, 4):
         try:
             params = {'page': page_num, 'pageSize': 10}
             response = requests.get(f"{HEVY_API_URL}/workouts", headers=headers, params=params)
             
             if response.status_code != 200:
-                print(f"Page {page_num} finished or failed.")
                 break
                 
             data = response.json()
@@ -38,8 +43,24 @@ def get_recent_workouts():
             
             if not workouts:
                 break
-                
-            all_workouts.extend(workouts)
+            
+            # --- DATE FILTERING LOGIC ---
+            for w in workouts:
+                # Hevy sends dates like '2023-10-27T12:00:00Z'
+                # We strip the 'Z' and convert to a Python date object
+                w_date_str = w.get('start_time', '').replace('Z', '')
+                try:
+                    w_date = datetime.fromisoformat(w_date_str)
+                except ValueError:
+                    continue # Skip if date is weird
+
+                # If the workout is NEWER than our cutoff, keep it.
+                if w_date >= cutoff_date:
+                    all_workouts.append(w)
+                else:
+                    # If we hit an old workout, we can stop fetching entirely 
+                    # (since Hevy returns them new -> old)
+                    return all_workouts
             
         except Exception as e:
             print(f"Error fetching page {page_num}: {e}")
@@ -52,6 +73,7 @@ def group_by_routine(workouts):
     routines = {}
     for w in workouts:
         title = w.get('title', 'Unknown Workout')
+        # Only keep the most recent occurrence of each routine title
         if title not in routines:
             routines[title] = w
     return routines
@@ -61,14 +83,13 @@ def calculate_next_target(exercise_name, sets):
 
     last_set = sets[-1]
     
-    # --- SANITIZE DATA (Fix for NoneType Error) ---
+    # Sanitize Data
     reps = last_set.get('reps')
     if reps is None: reps = 0
     
     weight_kg = last_set.get('weight_kg')
     if weight_kg is None: weight_kg = 0
     
-    # Convert KG to LBS
     weight_lbs = round(weight_kg * 2.20462, 1)
 
     rpe = last_set.get('rpe')
@@ -76,13 +97,9 @@ def calculate_next_target(exercise_name, sets):
 
     recommendation = {}
     
-    # LOGIC ENGINE (Universal Rule)
-    
-    # 0. SKIP: If reps are 0 (e.g. Cardio/Plank), skip it
-    if reps == 0:
-        return None
+    if reps == 0: return None
 
-    # 1. PASSED: Hit 12 reps @ RPE 9 -> Add 5 lbs
+    # Logic Engine
     if reps >= GOAL_REPS and rpe <= PROGRESSION_RPE_TRIGGER:
         new_weight = weight_lbs + WEIGHT_INCREMENT_LBS
         recommendation = {
@@ -90,16 +107,12 @@ def calculate_next_target(exercise_name, sets):
             "detail": f"Add {WEIGHT_INCREMENT_LBS} lbs. New Target: {int(new_weight)} lbs.",
             "color": "green"
         }
-    
-    # 2. BUILDING: Under 12 reps, not exhausted -> Add Reps
     elif reps < GOAL_REPS and rpe < 9:
         recommendation = {
             "action": "ADD REPS",
             "detail": f"Keep weight ({int(weight_lbs)} lbs). Push for {min(reps + 2, GOAL_REPS)} reps.",
             "color": "blue"
         }
-    
-    # 3. STRUGGLING: Low reps + High RPE -> Deload
     elif reps < (GOAL_REPS - 4) and rpe >= 9.5:
         new_weight = weight_lbs * 0.90
         recommendation = {
@@ -107,8 +120,6 @@ def calculate_next_target(exercise_name, sets):
             "detail": f"Performance dip. Drop to {int(new_weight)} lbs to rebuild volume.",
             "color": "red"
         }
-    
-    # 4. GRINDING: Close to limit -> Maintain
     else:
         recommendation = {
             "action": "MAINTAIN",
@@ -118,11 +129,11 @@ def calculate_next_target(exercise_name, sets):
 
     return {"exercise": exercise_name, "last": f"{reps} reps @ {int(weight_lbs)} lbs (RPE {rpe})", **recommendation}
 
-def send_email(html_body, text_body):
+def send_email(html_body, text_body, start_date, end_date):
     msg = MIMEMultipart("alternative")
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECEIVER
-    msg['Subject'] = "🏋️ Next Workout Menu (All Routines)"
+    msg['Subject'] = f"📅 Weekly Training Review ({start_date} - {end_date})"
 
     msg.attach(MIMEText(text_body, 'plain'))
     msg.attach(MIMEText(html_body, 'html'))
@@ -142,50 +153,27 @@ if __name__ == "__main__":
         print("Error: HEVY_API_KEY is missing.")
         exit()
 
-    print("Fetching workout history...")
-    workouts = get_recent_workouts()
+    print("Fetching last 7 days of workouts...")
+    workouts = get_weekly_workouts()
     latest_routines = group_by_routine(workouts)
     
     if not latest_routines:
-        print("No workouts found.")
+        print("No workouts found in the last 7 days.")
+        # Optional: You could enable this line if you WANT an email saying "No workouts this week"
+        # send_email("<h1>No workouts logged this week.</h1>", "No workouts logged this week.", "", "")
         exit()
 
-    print(f"Found {len(latest_routines)} active routines: {list(latest_routines.keys())}")
+    print(f"Found {len(latest_routines)} routines from this week.")
 
-    html_content = """
+    # Date formatting for the email subject
+    end_date = datetime.now().strftime('%b %d')
+    start_date = (datetime.now() - timedelta(days=7)).strftime('%b %d')
+
+    html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">📋 Your Workout Menu</h2>
-        <p>Targets calculated for your next session of each routine.</p>
+        <h2 style="color: #333;">📅 Weekly Review ({start_date} - {end_date})</h2>
+        <p>Analysis of your workouts from the past week.</p>
     """
-    text_content = "YOUR WORKOUT MENU\nTargets calculated for next session:\n\n"
+    text_content = f"WEEKLY REVIEW ({start_date} - {end_date})\n\n"
 
     for title, data in latest_routines.items():
-        
-        # Routine Header
-        html_content += f"""
-        <div style="background-color: #f4f4f4; padding: 10px; margin-top: 20px; border-radius: 5px;">
-            <h3 style="margin: 0; color: #222;">{title}</h3>
-            <span style="font-size: 12px; color: #666;">Last: {datetime.fromisoformat(data['start_time'].replace('Z', '+00:00')).strftime('%b %d')}</span>
-        </div>
-        <ul style="list-style-type: none; padding: 0;">
-        """
-        text_content += f"=== {title} ===\n"
-
-        for ex in data.get('exercises', []):
-            res = calculate_next_target(ex.get('title'), ex.get('sets', []))
-            if res:
-                html_content += f"""
-                <li style="padding: 10px 0; border-bottom: 1px solid #eee;">
-                    <strong>{res['exercise']}</strong><br>
-                    <span style="color:#666; font-size:13px;">Last: {res['last']}</span><br>
-                    <strong style="color:{res['color']}; font-size:14px;">👉 {res['action']}</strong>: {res['detail']}
-                </li>
-                """
-                text_content += f"[{res['exercise']}] {res['action']}: {res['detail']}\n"
-        
-        html_content += "</ul>"
-        text_content += "\n"
-
-    html_content += "</div>"
-
-    send_email(html_content, text_content)
