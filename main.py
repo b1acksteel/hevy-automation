@@ -7,16 +7,14 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (Loaded from Environment)
+# CONFIGURATION
 # ==========================================
 HEVY_API_KEY = os.environ.get("HEVY_API_KEY")
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD") # App Password, not login password
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
-
 HEVY_API_URL = 'https://api.hevyapp.com/v1'
 
-# Progressive Overload Settings
 GOAL_REPS = 12
 PROGRESSION_RPE_TRIGGER = 9
 WEIGHT_INCREMENT_KG = 2.5
@@ -25,28 +23,41 @@ WEIGHT_INCREMENT_LBS = 5
 def get_latest_workout():
     headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
     try:
-        response = requests.get(f"{HEVY_API_URL}/workouts", headers=headers, params={'page': 1, 'pageSize': 1})
+        # Fetch the last 3 workouts just in case the most recent one is empty
+        response = requests.get(f"{HEVY_API_URL}/workouts", headers=headers, params={'page': 1, 'pageSize': 3})
         response.raise_for_status()
         workouts = response.json().get('workouts', [])
-        return workouts[0] if workouts else None
+        
+        # Return the first workout that actually has exercises
+        for w in workouts:
+            if w.get('exercises'):
+                return w
+        return None
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error fetching Hevy data: {e}")
         return None
 
 def calculate_next_target(exercise_name, sets):
-    working_sets = [s for s in sets if s.get('set_type') == 'normal']
-    if not working_sets: return None
+    if not sets:
+        return None
 
-    last_set = working_sets[-1]
+    # SIMPLIFIED LOGIC: Just take the very last set, ignoring "set_type"
+    last_set = sets[-1]
+    
     reps = last_set.get('reps', 0)
     weight = last_set.get('weight_kg', 0)
-    rpe = last_set.get('rpe') if last_set.get('rpe') is not None else 8.0
+    
+    # Handle Bodyweight exercises (weight might be None)
+    if weight is None: weight = 0
+        
+    # Handle Missing RPE (Default to 8.0)
+    rpe = last_set.get('rpe')
+    if rpe is None: rpe = 8.0
 
     recommendation = {}
     
     # LOGIC ENGINE
     if reps >= GOAL_REPS and rpe <= PROGRESSION_RPE_TRIGGER:
-        new_weight = weight + WEIGHT_INCREMENT_KG
         recommendation = {
             "action": "INCREASE WEIGHT",
             "detail": f"Add {WEIGHT_INCREMENT_KG}kg / {WEIGHT_INCREMENT_LBS}lbs. Target 8-10 reps.",
@@ -74,15 +85,19 @@ def calculate_next_target(exercise_name, sets):
 
     return {"exercise": exercise_name, "last": f"{reps} reps @ {weight}kg (RPE {rpe})", **recommendation}
 
-def send_email(html_content, workout_title):
-    msg = MIMEMultipart()
+def send_email(html_content, text_content, workout_title):
+    msg = MIMEMultipart("alternative") # Important for compatibility
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECEIVER
-    msg['Subject'] = f"???? Next Workout Targets: {workout_title}"
-    msg.attach(MIMEText(html_content, 'html'))
+    msg['Subject'] = f"💪 Next Workout Targets: {workout_title}"
+
+    # Attach both Plain Text and HTML versions
+    part1 = MIMEText(text_content, 'plain')
+    part2 = MIMEText(html_content, 'html')
+    msg.attach(part1)
+    msg.attach(part2)
 
     try:
-        # Connect to Gmail SMTP
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -94,19 +109,58 @@ def send_email(html_content, workout_title):
 
 if __name__ == "__main__":
     print("Starting process...")
-    if not HEVY_API_KEY or not EMAIL_PASSWORD:
-        print("Error: Missing Environment Variables.")
-    else:
-        workout = get_latest_workout()
-        if workout:
-            # Build HTML
-            html = "<h1>???? Progressive Overload Targets</h1><ul>"
-            for ex in workout.get('exercises', []):
-                res = calculate_next_target(ex.get('title'), ex.get('sets', []))
-                if res:
-                    html += f"<li><strong>{res['exercise']}</strong><br><span style='color:gray'>{res['last']}</span><br><b style='color:{res['color']}'>{res['action']}</b>: {res['detail']}</li><br>"
-            html += "</ul>"
-            
-            send_email(html, workout.get('title'))
+    
+    if not HEVY_API_KEY:
+        print("Error: HEVY_API_KEY is missing.")
+        exit()
+
+    workout = get_latest_workout()
+    
+    if workout:
+        print(f"Analyzing workout: {workout.get('title')}")
+        
+        # Build Content
+        html_list_items = ""
+        text_list_items = ""
+        
+        count = 0
+        for ex in workout.get('exercises', []):
+            res = calculate_next_target(ex.get('title'), ex.get('sets', []))
+            if res:
+                count += 1
+                # HTML Format
+                html_list_items += f"""
+                <li style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #eee;">
+                    <strong style="font-size: 16px;">{res['exercise']}</strong><br>
+                    <span style="color:#666; font-size:14px;">Last: {res['last']}</span><br>
+                    <strong style="color:{res['color']}; font-size:14px;">👉 {res['action']}</strong>: {res['detail']}
+                </li>
+                """
+                # Text Format
+                text_list_items += f"[{res['exercise']}]\nLast: {res['last']}\nACTION: {res['action']} - {res['detail']}\n\n"
+
+        if count == 0:
+            html_content = "<h1>No valid exercises found in the last workout.</h1>"
+            text_content = "No valid exercises found in the last workout."
         else:
-            print("No workout found.")
+            html_content = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">🚀 Progressive Overload Targets</h2>
+                <p>Based on: <strong>{workout.get('title')}</strong></p>
+                <hr>
+                <ul style="list-style-type: none; padding: 0;">
+                    {html_list_items}
+                </ul>
+                <p style="font-size: 12px; color: #999; margin-top: 30px;">Generated automatically via Hevy API</p>
+            </div>
+            """
+            text_content = f"PROGRESSIVE OVERLOAD PLAN\nBased on: {workout.get('title')}\n\n{text_list_items}"
+
+        # DEBUG: Print to GitHub Logs so we can see it!
+        print("--- GENERATED EMAIL CONTENT (PREVIEW) ---")
+        print(text_content)
+        print("-----------------------------------------")
+
+        send_email(html_content, text_content, workout.get('title'))
+    else:
+        print("No workout found.")
