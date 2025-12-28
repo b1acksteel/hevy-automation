@@ -64,16 +64,20 @@ def group_by_routine(workouts):
 
 def calculate_next_target(exercise_name, sets):
     if not sets: return None
-    last_set = sets[-1]
+
+    # --- UPDATED LOGIC: FIND HEAVIEST SET ---
+    # Instead of taking the last set [-1], we look for the set with the highest weight.
+    # We use 'or 0' to handle cases where weight might be None (bodyweight).
+    working_set = max(sets, key=lambda s: s.get('weight_kg') or 0)
     
-    reps = last_set.get('reps'); 
+    reps = working_set.get('reps')
     if reps is None: reps = 0
     
-    weight_kg = last_set.get('weight_kg')
+    weight_kg = working_set.get('weight_kg')
     if weight_kg is None: weight_kg = 0
     weight_lbs = round(weight_kg * 2.20462, 1)
 
-    rpe = last_set.get('rpe')
+    rpe = working_set.get('rpe')
     if rpe is None: rpe = 8.0
 
     recommendation = {}
@@ -192,17 +196,15 @@ if __name__ == "__main__":
         for ex in data.get('exercises', []):
             res = calculate_next_target(ex.get('title'), ex.get('sets', []))
             if res:
-                # BADGE STYLE
                 badge_style = f"background-color:{res['badge_color']}; color:{res['text_color']}; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;"
                 
-                # EXERCISE ROW
                 html_content += f"""
                 <div style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;">
                     <table width="100%" border="0">
                         <tr>
                             <td width="60%" valign="top">
                                 <strong style="color:#222; font-size:15px; display:block; margin-bottom:4px;">{res['exercise']}</strong>
-                                <span style="color:#999; font-size:13px;">Last: {res['last']}</span>
+                                <span style="color:#999; font-size:13px;">Top Set: {res['last']}</span>
                             </td>
                             <td width="40%" align="right" valign="top">
                                 <span style="{badge_style}">{res['action']}</span>
@@ -217,7 +219,6 @@ if __name__ == "__main__":
         html_content += "</div>"
         text_content += "\n"
 
-    # --- HTML FOOTER ---
     html_content += """
                             </td>
                         </tr>
