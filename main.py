@@ -17,7 +17,11 @@ HEVY_API_URL = 'https://api.hevyapp.com/v1'
 # Global Progression Settings
 GOAL_REPS = 12
 PROGRESSION_RPE_TRIGGER = 9
-WEIGHT_INCREMENT_LBS = 5
+
+# MODIFICATION : Poids en KG. 
+# Mettre 2.5 pour une augmentation standard (1.25 de chaque côté)
+# ou 2.0 si ta salle a des disques ronds.
+WEIGHT_INCREMENT_KG = 2.5
 
 def get_weekly_workouts():
     headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
@@ -65,17 +69,20 @@ def group_by_routine(workouts):
 def calculate_next_target(exercise_name, sets):
     if not sets: return None
 
-    # --- UPDATED LOGIC: FIND HEAVIEST SET ---
-    # Instead of taking the last set [-1], we look for the set with the highest weight.
-    # We use 'or 0' to handle cases where weight might be None (bodyweight).
+    # --- UPDATED LOGIC: FIND HEAVIEST SET (KG) ---
     working_set = max(sets, key=lambda s: s.get('weight_kg') or 0)
     
     reps = working_set.get('reps')
     if reps is None: reps = 0
     
+    # On récupère le poids directement en KG
     weight_kg = working_set.get('weight_kg')
     if weight_kg is None: weight_kg = 0
-    weight_lbs = round(weight_kg * 2.20462, 1)
+    
+    # On garde les décimales (ex: 22.5) mais on évite les trucs genre 22.5000001
+    current_weight = round(weight_kg, 2)
+    # Petite astuce d'affichage: si c'est 20.0, on affiche 20. Sinon 22.5
+    display_weight = int(current_weight) if current_weight.is_integer() else current_weight
 
     rpe = working_set.get('rpe')
     if rpe is None: rpe = 8.0
@@ -85,41 +92,45 @@ def calculate_next_target(exercise_name, sets):
 
     # Logic Engine
     if reps >= GOAL_REPS and rpe <= PROGRESSION_RPE_TRIGGER:
-        new_weight = weight_lbs + WEIGHT_INCREMENT_LBS
+        new_weight = current_weight + WEIGHT_INCREMENT_KG
+        disp_new = int(new_weight) if new_weight.is_integer() else new_weight
+        
         recommendation = {
             "action": "INCREASE WEIGHT",
-            "detail": f"Add {WEIGHT_INCREMENT_LBS} lbs",
-            "target_display": f"Target: {int(new_weight)} lbs",
+            "detail": f"Add {WEIGHT_INCREMENT_KG} kg",
+            "target_display": f"Target: {disp_new} kg",
             "badge_color": "#d4edda", # Light Green bg
             "text_color": "#155724"   # Dark Green text
         }
     elif reps < GOAL_REPS and rpe < 9:
         recommendation = {
             "action": "ADD REPS",
-            "detail": f"Keep {int(weight_lbs)} lbs",
+            "detail": f"Keep {display_weight} kg",
             "target_display": f"Target: {min(reps + 2, GOAL_REPS)} reps",
             "badge_color": "#cce5ff", # Light Blue bg
             "text_color": "#004085"   # Dark Blue text
         }
     elif reps < (GOAL_REPS - 4) and rpe >= 9.5:
-        new_weight = weight_lbs * 0.90
+        new_weight = round(current_weight * 0.90, 2)
+        disp_new = int(new_weight) if new_weight.is_integer() else new_weight
+        
         recommendation = {
             "action": "DELOAD",
             "detail": "Performance Dip",
-            "target_display": f"Reset to: {int(new_weight)} lbs",
+            "target_display": f"Reset to: {disp_new} kg",
             "badge_color": "#f8d7da", # Light Red bg
             "text_color": "#721c24"   # Dark Red text
         }
     else:
         recommendation = {
             "action": "MAINTAIN",
-            "detail": f"Keep {int(weight_lbs)} lbs",
+            "detail": f"Keep {display_weight} kg",
             "target_display": "Squeeze 1 more rep",
             "badge_color": "#e2e3e5", # Light Gray bg
             "text_color": "#383d41"   # Dark Gray text
         }
 
-    return {"exercise": exercise_name, "last": f"{reps} @ {int(weight_lbs)} lbs (RPE {rpe})", **recommendation}
+    return {"exercise": exercise_name, "last": f"{reps} @ {display_weight} kg (RPE {rpe})", **recommendation}
 
 def send_email(html_body, text_body, start_date, end_date):
     msg = MIMEMultipart("alternative")
