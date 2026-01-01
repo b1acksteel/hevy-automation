@@ -22,7 +22,7 @@ WEIGHT_INCREMENT_LBS = 5
 def get_weekly_workouts():
     headers = {'api-key': HEVY_API_KEY, 'accept': 'application/json'}
     all_workouts = []
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
     print(f"Filtering for workouts after: {cutoff_date.strftime('%Y-%m-%d')}")
 
     for page_num in range(1, 4):
